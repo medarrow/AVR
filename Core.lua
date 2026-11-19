@@ -15,7 +15,7 @@
 
 AVR = {}
 local AVR = AVR
-AVR.version = "1.0"
+AVR.version = "1.0.1"
 
 local sin, cos, tan, abs, sqrt, floor = math.sin, math.cos, math.tan, math.abs, math.sqrt, math.floor
 local PI = math.pi
@@ -25,6 +25,11 @@ local LINE_TEX = "Interface\\AddOns\\AVR\\Textures\\line"
 local TRI_TEX = "Interface\\AddOns\\AVR\\Textures\\tri"
 
 local NEAR = 0.3 -- near clip plane, yards
+
+-- Limits on what one mesh may cost per frame; shared scenes come from other
+-- players, so these are enforced at draw time, not trusted.
+local MAX_SEGS = 128
+local MAX_WIDTH = 20
 
 -------------------------------------------------------------------------------
 -- Settings and saved data
@@ -200,6 +205,8 @@ function AVR:ResolveUnit(unit)
 	if not unit or unit == "" then return nil end
 	local l = string.lower(unit)
 	if IsToken(l) then
+		-- GUID tokens keep their original spelling for the client to parse
+		if string.find(l, "^0x") then l = unit end
 		if UnitExists(l) then return l end
 		return nil
 	end
@@ -387,40 +394,49 @@ function AVR:VerticalFov(aspect)
 	return self:BaseFov() / sqrt(1 + aspect * aspect)
 end
 
---[[ Reads the saved view: distance, pitch, yaw.
+--[[ Saves the live camera into view slot 5 and reads it back: distance,
+	pitch, yaw.
 
-	Which cvar letter belongs to view slot 5 is not something the client
-	documents (D or E), so both are watched until one of them is seen to
-	follow the camera; that one is then used alone.
+	Which cvar letter belongs to slot 5 is not something the client
+	documents (D or E). Until that is known, both letters are read before and
+	after SaveView: the one SaveView changed is slot 5. The other one is a
+	view the player saved and never changes within a frame.
 ]]
-local viewLast = {}
-local viewLetters = { "D", "E" }
+local viewLetters = { "E", "D" }
+
+local function ViewKey(s)
+	local d = CVarNum("cameraDistance" .. s)
+	if not d then return nil end
+	return d .. "/" .. (CVarNum("cameraPitch" .. s) or 0) .. "/" .. (CVarNum("cameraYaw" .. s) or 0)
+end
+
 function AVR:ReadView()
 	local sfx = self.viewSuffix
 	if sfx then
+		SaveView(5)
 		return CVarNum("cameraDistance" .. sfx) or 0,
 			CVarNum("cameraPitch" .. sfx) or 0,
 			CVarNum("cameraYaw" .. sfx) or 0
 	end
-	local guess, moved, nMoved
-	nMoved = 0
+
+	local before = {}
+	for _, s in ipairs(viewLetters) do before[s] = ViewKey(s) or false end
+	SaveView(5)
+	local changed, nChanged, exists = nil, 0, nil
 	for _, s in ipairs(viewLetters) do
-		local d = CVarNum("cameraDistance" .. s)
-		if d then
-			local p, y = CVarNum("cameraPitch" .. s) or 0, CVarNum("cameraYaw" .. s) or 0
-			local key = d .. "/" .. p .. "/" .. y
-			if viewLast[s] and viewLast[s] ~= key then
-				moved = s
-				nMoved = nMoved + 1
+		local after = ViewKey(s)
+		if after then
+			if not exists then exists = s end
+			if after ~= before[s] then
+				changed = s
+				nChanged = nChanged + 1
 			end
-			viewLast[s] = key
-			if not guess then guess = s end
 		end
 	end
-	if nMoved == 1 then
-		self.viewSuffix = moved
-		guess = moved
-	end
+	if nChanged == 1 then self.viewSuffix = changed end
+	-- Nothing changed: the camera matches what slot 5 already held. Keep the
+	-- last guess, else the first letter that exists.
+	local guess = self.viewSuffix or self.viewGuess or exists
 	self.viewGuess = guess
 	if not guess then return nil end
 	return CVarNum("cameraDistance" .. guess) or 0,
@@ -437,8 +453,6 @@ function AVR:UpdateCamera()
 	local facing, src = self:GetFacing()
 	if not facing then C.err = "no player facing" return false end
 
-	-- SaveView writes the live camera into the cvars of view slot 5.
-	SaveView(5)
 	local dist, pitchDeg, yawDeg = self:ReadView()
 	if not dist then C.err = "camera cvars unavailable" return false end
 
@@ -480,8 +494,20 @@ function AVR:UpdateCamera()
 	C.w, C.h, C.left, C.bottom = scrW, scrH, left, bottom
 	C.facingSource = src
 	C.err = nil
+	C.idle = nil
 	C.ok = true
 	return true
+end
+
+-- Camera state for a one-off action (pinning, starting a tool) at a moment
+-- when the per-frame update may have been skipped.
+function AVR:EnsureCamera()
+	if C.ok then return true end
+	if not self.db or not self.settings.enabled then
+		C.err = "drawing is disabled"
+		return false
+	end
+	return self:UpdateCamera()
 end
 
 -- World position under a screen point (canvas units), on the horizontal
@@ -501,8 +527,10 @@ end
 -- World position under the mouse cursor on the plane at height z.
 function AVR:CursorToWorld(z)
 	if not C.ok then return nil end
+	-- GetCursorPosition is unscaled; the canvas works in its own units
+	local scale = self.canvas:GetEffectiveScale()
 	local mx, my = GetCursorPosition()
-	return self:ScreenToWorld(mx - C.left, my - C.bottom, z or C.pz)
+	return self:ScreenToWorld(mx / scale - C.left, my / scale - C.bottom, z or C.pz)
 end
 
 -------------------------------------------------------------------------------
@@ -528,7 +556,15 @@ function AVR:SetColor(r, g, b, a)
 end
 
 function AVR:SetLineWidth(w)
-	lineW = w or self.settings.lineWidth or 3
+	w = tonumber(w) or self.settings.lineWidth or 3
+	if w < 0.5 then w = 0.5 elseif w > MAX_WIDTH then w = MAX_WIDTH end
+	lineW = w
+end
+
+local function Segments(segs, default)
+	segs = floor(tonumber(segs) or default)
+	if segs > MAX_SEGS then return MAX_SEGS end
+	return segs
 end
 
 -- Liang-Barsky step.
@@ -721,7 +757,8 @@ end
 -- A flat circle. 'segs' defaults by radius.
 function AVR:Circle(x, y, z, radius, segs, filled)
 	if not self:InRange(x, y, z, radius) then return end
-	if not segs or segs < 3 then
+	segs = Segments(segs, 0)
+	if segs < 3 then
 		segs = 24
 		if radius > 12 then segs = 36 end
 		if radius > 30 then segs = 48 end
@@ -743,8 +780,11 @@ end
 function AVR:Sector(x, y, z, radius, a0, a1, segs, filled)
 	if not self:InRange(x, y, z, radius) then return end
 	local span = a1 - a0
-	if not segs or segs < 1 then
-		segs = floor(abs(span) / (2 * PI) * 36 + 0.5)
+	-- past a full turn a cone is just a circle
+	if span > 2 * PI then span = 2 * PI elseif span < -2 * PI then span = -2 * PI end
+	segs = Segments(segs, 0)
+	if segs < 1 then
+		segs = Segments(abs(span) / (2 * PI) * 36 + 0.5, 0)
 		if segs < 2 then segs = 2 end
 	end
 	local step = span / segs
@@ -801,6 +841,7 @@ end
 
 -- Turns a unit-anchored mesh into one fixed to the ground where it is now.
 function AVR:PinMesh(m)
+	self:EnsureCamera() -- for the player's height and current map
 	local x, y, z, f = self:Locate(m)
 	if not x then return false end
 	m.x, m.y, m.z, m.rot, m.map = x, y, z, f, C.map
@@ -830,9 +871,28 @@ local function HideUnused()
 	shownLines, shownTris = nLines, nTris
 end
 
+-- Anything to draw this frame? With nothing, the camera is left alone: no
+-- SaveView every frame for an addon that is showing nothing.
+function AVR:HasWork()
+	if self.ActiveTool and self:ActiveTool() then return true end
+	if getn(self.temps) > 0 then return true end
+	for _, scene in ipairs(self.db.scenes) do
+		if scene.visible then
+			for _, m in ipairs(scene.meshes) do
+				if not m.hidden then return true end
+			end
+		end
+	end
+	return false
+end
+
 function AVR:OnFrame()
 	nLines, nTris = 0, 0
-	if self.db and self.settings.enabled and self:UpdateCamera() then
+	local work = self.db and self.settings.enabled and self:HasWork()
+	if not work then
+		C.ok, C.err, C.idle = false, nil, true
+	end
+	if work and self:UpdateCamera() then
 		for _, scene in ipairs(self.db.scenes) do
 			if scene.visible then
 				for _, m in ipairs(scene.meshes) do self:DrawMesh(m) end
@@ -869,6 +929,7 @@ end
 
 -- Circle fixed at a world position (default: where the unit stands now).
 function AVR:MarkPosition(x, y, z, radius, duration, r, g, b, a, filled)
+	self:EnsureCamera() -- for the player's height and current map
 	if type(x) == "string" then
 		local u = self:ResolveUnit(x)
 		if not u then return nil end
@@ -908,6 +969,7 @@ events:SetScript("OnEvent", function()
 		if arg1 == "player" then AVR:ResetPivotProbe() end
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		AVR:ResetPivotProbe()
+		groupDirty = true
 	elseif event == "CHAT_MSG_ADDON" then
 		if AVR.OnAddonMessage then AVR:OnAddonMessage(arg1, arg2, arg3, arg4) end
 	else

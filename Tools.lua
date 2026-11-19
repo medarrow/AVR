@@ -38,7 +38,7 @@ local function SetHint()
 end
 
 function AVR:StartTool(which)
-	if not self.cam.ok then
+	if not self:EnsureCamera() then
 		self:Print("Cannot start: " .. (self.cam.err or "drawing is disabled") .. ".")
 		return
 	end

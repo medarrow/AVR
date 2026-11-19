@@ -145,6 +145,12 @@ end
 local incoming = {} -- sender .. id -> { total = n, got = n, parts = {} }
 local pending       -- scene waiting for the accept popup
 
+-- Finite and inside the world; everything else (inf, nan, absurd sizes) is
+-- dropped rather than drawn.
+local function GoodNumber(v)
+	return v == v and v > -100000 and v < 100000
+end
+
 -- Keeps only what a mesh may legitimately contain.
 local function Sanitize(scene)
 	if type(scene) ~= "table" or type(scene.meshes) ~= "table" then return nil end
@@ -155,16 +161,22 @@ local function Sanitize(scene)
 			local c = {}
 			for k, v in pairs(m) do
 				local tv = type(v)
-				if type(k) == "string" and (tv == "number" or tv == "boolean") then
+				if k == "expires" then
+					-- timing belongs to the receiver
+				elseif type(k) == "string" and tv == "number" then
+					if GoodNumber(v) then c[k] = v end
+				elseif type(k) == "string" and tv == "boolean" then
 					c[k] = v
 				elseif type(k) == "string" and tv == "string" then
 					c[k] = string.sub(v, 1, 40)
 				elseif k == "pts" and tv == "table" then
 					local pts = {}
 					for i, p in ipairs(v) do
-						if type(p) ~= "number" or i > 600 then break end
+						if type(p) ~= "number" or not GoodNumber(p) or i > 600 then break end
 						pts[i] = p
 					end
+					-- whole points only
+					for i = getn(pts), getn(pts) - math.mod(getn(pts), 3) + 1, -1 do pts[i] = nil end
 					c.pts = pts
 				end
 			end
@@ -212,10 +224,16 @@ function AVR:OnAddonMessage(prefix, msg, channel, from)
 	idx, total = tonumber(idx), tonumber(total)
 	if total < 1 or total > MAX_CHUNKS or idx < 1 or idx > total then return end
 
-	local key = from .. id
+	-- transfers that stopped arriving are dropped after a minute
+	local now = GetTime()
+	for k, r in pairs(incoming) do
+		if now - r.time > 60 then incoming[k] = nil end
+	end
+
+	local key = from .. ":" .. id
 	local rec = incoming[key]
 	if not rec then
-		rec = { total = total, got = 0, parts = {} }
+		rec = { total = total, got = 0, parts = {}, time = now }
 		incoming[key] = rec
 	end
 	if rec.total ~= total then

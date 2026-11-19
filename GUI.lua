@@ -98,8 +98,11 @@ local function ApplyEdit(slot)
 	local text = slot.edit:GetText()
 	if f.kind == "number" then
 		local n = tonumber(text)
-		if f.key == "width" and (not n or n <= 0) then n = nil end
-		if n or f.key == "width" then m[f.key] = n end
+		if text == "" or (f.key == "width" and n and n <= 0) then
+			m[f.key] = nil
+		elseif n then
+			m[f.key] = n
+		end
 	elseif f.key == "unit" then
 		if text == "" then
 			-- no unit: fix it to the ground where it is now
@@ -259,6 +262,20 @@ StaticPopupDialogs["AVR_NEW_SCENE"] = {
 	hideOnEscape = 1,
 }
 
+StaticPopupDialogs["AVR_DELETE_SCENE"] = {
+	text = "Delete the AVR scene '%s' and everything in it?",
+	button1 = TEXT(YES),
+	button2 = TEXT(NO),
+	OnAccept = function()
+		AVR:DeleteScene()
+		selected, listOffset = nil, 0
+		AVR:RefreshGUI()
+	end,
+	timeout = 0,
+	whileDead = 1,
+	hideOnEscape = 1,
+}
+
 local function Slider(parent, name, label, lo, hi, step, onChange)
 	local s = CreateFrame("Slider", name, parent, "OptionsSliderTemplate")
 	s:SetWidth(110)
@@ -267,10 +284,12 @@ local function Slider(parent, name, label, lo, hi, step, onChange)
 	getglobal(name .. "Low"):SetText("")
 	getglobal(name .. "High"):SetText("")
 	s.title = label
+	s.Label = function(self)
+		getglobal(self:GetName() .. "Text"):SetText(self.title .. ": " .. string.format("%.1f", self:GetValue()))
+	end
 	s:SetScript("OnValueChanged", function()
-		local v = this:GetValue()
-		getglobal(this:GetName() .. "Text"):SetText(this.title .. ": " .. string.format("%.1f", v))
-		if not loading then onChange(v) end
+		this:Label()
+		if not loading then onChange(this:GetValue()) end
 	end)
 	return s
 end
@@ -333,9 +352,7 @@ local function CreateGUI()
 	local newb = Button(gui, "New", 50, function() StaticPopup_Show("AVR_NEW_SCENE") end)
 	newb:SetPoint("LEFT", nextb, "RIGHT", 6, 0)
 	local delb = Button(gui, "Delete", 60, function()
-		AVR:DeleteScene()
-		selected, listOffset = nil, 0
-		AVR:RefreshGUI()
+		StaticPopup_Show("AVR_DELETE_SCENE", AVR:GetScene().name)
 	end)
 	delb:SetPoint("LEFT", newb, "RIGHT", 4, 0)
 
@@ -447,7 +464,7 @@ function AVR:RefreshGUI()
 	gui.enable:SetChecked(self.settings.enabled and 1 or nil)
 	gui.sceneName:SetText(scene.name .. "  (" .. self.db.current .. "/" .. getn(self.db.scenes) .. ")")
 	gui.visible:SetChecked(scene.visible and 1 or nil)
-	if self.cam.ok or not self.settings.enabled then
+	if self.cam.ok or self.cam.idle or not self.settings.enabled then
 		gui.status:SetText("")
 	else
 		gui.status:SetText("|cffff4040" .. (self.cam.err or "") .. "|r")
@@ -481,6 +498,8 @@ function AVR:RefreshGUI()
 	gui.height:SetValue((self:PivotHeight()))
 	local w, h = self.cam.w or 4, self.cam.h or 3
 	gui.fov:SetValue(self:VerticalFov(w / h) * 180 / math.pi)
+	gui.height:Label()
+	gui.fov:Label()
 	loading = false
 end
 
@@ -511,7 +530,8 @@ local help = {
 	"/avr scene <name> - switch to a scene, creating it if needed",
 	"/avr clear - empty the current scene",
 	"/avr share - send the current scene to your group",
-	"/avr height <yd|auto>, fov <deg|auto>, yawsign, width <n> - calibration",
+	"/avr receive on | off - accept or ignore scenes shared by others",
+	"/avr height <yd|auto>, fov <deg|auto>, yawsign, pitchsign, width <n> - calibration",
 	"/avr status - what the camera maths is seeing",
 }
 
@@ -522,6 +542,10 @@ SlashCmdList["AVR"] = function(msg)
 	local args = {}
 	for w in string.gfind(rest or "", "%S+") do tinsert(args, w) end
 	local s = AVR.settings
+	if not s then
+		AVR:Print("Not ready yet - try again in a moment.")
+		return
+	end
 
 	if cmd == "" then
 		AVR:ToggleGUI()
@@ -564,6 +588,9 @@ SlashCmdList["AVR"] = function(msg)
 		AVR:Print("Scene '" .. AVR:GetScene().name .. "' cleared.")
 	elseif cmd == "share" then
 		AVR:ShareScene()
+	elseif cmd == "receive" then
+		if args[1] == "on" then s.share = "ask" elseif args[1] == "off" then s.share = "never" end
+		AVR:Print("Scenes shared by others: " .. (s.share == "never" and "ignored" or "offered to you"))
 	elseif cmd == "height" then
 		s.pivotHeight = tonumber(args[1])
 		AVR:Print(string.format("Camera height: %.2f yd%s", AVR:PivotHeight(), s.pivotHeight and "" or " (auto)"))
@@ -579,9 +606,12 @@ SlashCmdList["AVR"] = function(msg)
 		s.pitchSign = -(s.pitchSign or 1)
 		AVR:Print("Camera pitch sign: " .. s.pitchSign)
 	elseif cmd == "width" then
-		s.lineWidth = tonumber(args[1]) or 3
+		local w = tonumber(args[1]) or 3
+		if w < 0.5 then w = 0.5 elseif w > 20 then w = 20 end
+		s.lineWidth = w
 		AVR:Print("Line width: " .. s.lineWidth)
 	elseif cmd == "status" then
+		AVR:EnsureCamera()
 		local c = AVR.cam
 		local capi = C_PlayerInfo and C_PlayerInfo.UnitPosition
 		AVR:Print("positions: " .. (UnitPosition and "UnitPosition" or "")

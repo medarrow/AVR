@@ -1,8 +1,10 @@
 ## Interface: 11200
 ## Title: AVR
-## Notes: Augmented Virtual Reality. Draw circles, lines and markers on the 3D world. Requires SuperWoW.
-## Author: 1.12 rewrite, after the original AVR by Olog
-## Version: 1.0
+## Notes: Augmented Virtual Reality. Draw circles, lines and markers on the 3D world. Requires SuperWoW or ClassicAPI.
+## Author: medarrow
+## Version: 1.0.1
+## X-Website: https://github.com/medarrow/AVR
+## X-License: MIT
 ## SavedVariables: AVR_DB
 Core.lua
 Meshes.lua
