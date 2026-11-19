@@ -1,0 +1,11 @@
+## Interface: 11200
+## Title: AVR
+## Notes: Augmented Virtual Reality. Draw circles, lines and markers on the 3D world. Requires SuperWoW.
+## Author: 1.12 rewrite, after the original AVR by Olog
+## Version: 1.0
+## SavedVariables: AVR_DB
+Core.lua
+Meshes.lua
+Tools.lua
+Comm.lua
+GUI.lua

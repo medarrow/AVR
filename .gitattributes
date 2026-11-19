@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.tga binary
+
+# Left out of release archives (git archive)
+.gitignore export-ignore
+.gitattributes export-ignore
+.github export-ignore

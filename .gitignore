@@ -1,0 +1,18 @@
+# Release builds
+*.zip
+dist/
+
+# OS clutter
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local tooling
+.claude/
+__pycache__/
